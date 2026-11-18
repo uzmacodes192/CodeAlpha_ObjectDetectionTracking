@@ -1,0 +1,49 @@
+# CodeAlpha_ObjectDetectionTracking
+
+Real-time **object detection and tracking** using YOLOv8 and ByteTrack. Built for the **CodeAlpha AI Internship – Task 4**.
+
+## Features
+- Input from **webcam** or **video file** (OpenCV)
+- **YOLOv8** pre-trained on COCO (80 classes: person, car, dog, bottle, ...)
+- **Object tracking** (ByteTrack, a SORT-family algorithm; BoT-SORT also available) so each object keeps a unique **ID**
+- Bounding boxes with **class label, tracking ID and confidence**
+- **Motion trails**, live **FPS**, per-class counts and total unique objects
+- Filter by class (`--classes person car`), save output video, headless mode
+
+## How it works
+1. OpenCV reads each frame from the webcam/video.
+2. `model.track(...)` runs YOLOv8 detection and associates detections across frames with the tracker (`persist=True` keeps IDs consistent).
+3. Boxes, labels, IDs and trails are drawn on the frame and shown in real time.
+
+## Setup
+```bash
+pip install -r requirements.txt
+```
+The YOLO weights (`yolov8n.pt`, ~6 MB) download automatically on the first run.
+
+## Run
+```bash
+python main.py                                  # webcam
+python main.py --source path/to/video.mp4       # video file
+python main.py --source video.mp4 --save        # saves output/result.mp4
+python main.py --classes person car --conf 0.4  # only people & cars
+python main.py --model yolov8s.pt               # more accurate, slower
+python main.py --tracker botsort.yaml           # different tracker
+```
+Press **q** in the window to quit. If you have no display (e.g. Google Colab), use `--no-show --save`.
+
+## Options
+| Option | Default | Meaning |
+|---|---|---|
+| `--source` | `0` | `0` = webcam, or video path |
+| `--model` | `yolov8n.pt` | `n/s/m/l/x` = faster → more accurate |
+| `--tracker` | `bytetrack.yaml` | `bytetrack.yaml` or `botsort.yaml` |
+| `--conf` | `0.35` | Detection confidence threshold |
+| `--classes` | all | Track only these class names |
+| `--trail` | `30` | Trail length in frames (0 = off) |
+| `--speed` | `1.0` | Playback speed: `0.5` = half speed (slower), `2` = double |
+| `--save` | off | Save annotated video |
+| `--no-show` | off | No preview window |
+
+## Tech stack
+Python, OpenCV, Ultralytics YOLOv8, ByteTrack, NumPy
