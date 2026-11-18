@@ -1,0 +1,157 @@
+"""
+Object Detection and Tracking (CodeAlpha AI Internship - Task 4)
+
+- Input   : webcam or video file (OpenCV)
+- Detect  : pre-trained YOLOv8 (COCO, 80 classes)
+- Track   : ByteTrack (SORT-family tracker built into Ultralytics) or BoT-SORT
+- Output  : live window with boxes, labels, tracking IDs, FPS, motion trails
+            + optional saved video
+
+Examples
+    python main.py                              # webcam
+    python main.py --source video.mp4           # video file
+    python main.py --source video.mp4 --save    # also save output/result.mp4
+    python main.py --classes person car --conf 0.4
+    python main.py --no-show --save --source video.mp4   # headless (no window)
+"""
+import argparse
+import time
+from collections import defaultdict, deque
+from pathlib import Path
+
+import cv2
+import numpy as np
+from ultralytics import YOLO
+
+
+def parse_args():
+    p = argparse.ArgumentParser(description="YOLOv8 object detection + tracking")
+    p.add_argument("--source", default="0", help="0 for webcam, or path to a video file")
+    p.add_argument("--model", default="yolov8n.pt", help="yolov8n/s/m/l/x .pt (auto-downloads)")
+    p.add_argument("--tracker", default="bytetrack.yaml", choices=["bytetrack.yaml", "botsort.yaml"])
+    p.add_argument("--conf", type=float, default=0.35, help="confidence threshold")
+    p.add_argument("--classes", nargs="*", default=None,
+                   help="only track these class names, e.g. --classes person car")
+    p.add_argument("--save", action="store_true", help="save annotated video to output/result.mp4")
+    p.add_argument("--no-show", action="store_true", help="do not open a preview window")
+    p.add_argument("--trail", type=int, default=30, help="trail length in frames (0 = off)")
+    p.add_argument("--speed", type=float, default=1.0,
+                   help="playback speed: 1 = normal, 0.5 = half speed (slower), 2 = double")
+    return p.parse_args()
+
+
+def color_for_id(track_id: int):
+    """Stable, distinct BGR color per tracking ID."""
+    rng = np.random.default_rng(track_id * 7919)
+    return tuple(int(c) for c in rng.integers(60, 255, size=3))
+
+
+def open_source(source: str):
+    src = int(source) if source.isdigit() else source
+    cap = cv2.VideoCapture(src)
+    if not cap.isOpened():
+        raise SystemExit(f"Could not open source: {source}")
+    return cap
+
+
+def main():
+    args = parse_args()
+    model = YOLO(args.model)
+    names = model.names  # {id: name}
+
+    class_ids = None
+    if args.classes:
+        lookup = {v.lower(): k for k, v in names.items()}
+        missing = [c for c in args.classes if c.lower() not in lookup]
+        if missing:
+            raise SystemExit(f"Unknown class(es): {missing}. Valid: {sorted(lookup)}")
+        class_ids = [lookup[c.lower()] for c in args.classes]
+
+    cap = open_source(args.source)
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    fps_in = cap.get(cv2.CAP_PROP_FPS) or 30
+
+    writer = None
+    if args.save:
+        Path("output").mkdir(exist_ok=True)
+        writer = cv2.VideoWriter("output/result.mp4", cv2.VideoWriter_fourcc(*"mp4v"),
+                                 fps_in * args.speed, (width, height))
+
+    trails = defaultdict(lambda: deque(maxlen=max(args.trail, 1)))
+    seen_ids = set()
+    prev_time, fps = time.time(), 0.0
+
+    print("Running... press 'q' in the window (or Ctrl+C) to stop.")
+    try:
+        while True:
+            loop_start = time.time()
+            ok, frame = cap.read()
+            if not ok:
+                break
+
+            # persist=True keeps tracker state between frames so IDs stay consistent
+            result = model.track(frame, persist=True, tracker=args.tracker,
+                                 conf=args.conf, classes=class_ids, verbose=False)[0]
+
+            counts = defaultdict(int)
+            boxes = result.boxes
+            if boxes is not None and len(boxes):
+                xyxy = boxes.xyxy.cpu().numpy().astype(int)
+                clss = boxes.cls.cpu().numpy().astype(int)
+                confs = boxes.conf.cpu().numpy()
+                ids = (boxes.id.cpu().numpy().astype(int)
+                       if boxes.id is not None else [-1] * len(xyxy))
+
+                for (x1, y1, x2, y2), c, cf, tid in zip(xyxy, clss, confs, ids):
+                    name = names[c]
+                    counts[name] += 1
+                    col = color_for_id(tid) if tid >= 0 else (0, 255, 0)
+                    label = f"{name} #{tid} {cf:.2f}" if tid >= 0 else f"{name} {cf:.2f}"
+
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), col, 2)
+                    (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 1)
+                    cv2.rectangle(frame, (x1, y1 - th - 8), (x1 + tw + 6, y1), col, -1)
+                    cv2.putText(frame, label, (x1 + 3, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX,
+                                0.55, (0, 0, 0), 1, cv2.LINE_AA)
+
+                    if tid >= 0:
+                        seen_ids.add(tid)
+                        if args.trail:
+                            trails[tid].append(((x1 + x2) // 2, (y1 + y2) // 2))
+                            pts = np.array(trails[tid], dtype=np.int32).reshape(-1, 1, 2)
+                            if len(pts) > 1:
+                                cv2.polylines(frame, [pts], False, col, 2)
+
+            # FPS + live counts overlay
+            now = time.time()
+            fps = 0.9 * fps + 0.1 * (1.0 / max(now - prev_time, 1e-6))
+            prev_time = now
+            summary = ", ".join(f"{k}: {v}" for k, v in sorted(counts.items())) or "none"
+            cv2.putText(frame, f"FPS: {fps:.1f} | Unique IDs: {len(seen_ids)}", (10, 25),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2, cv2.LINE_AA)
+            cv2.putText(frame, f"In frame -> {summary}", (10, 52),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2, cv2.LINE_AA)
+
+            if writer:
+                writer.write(frame)
+            if not args.no_show:
+                cv2.imshow("Object Detection & Tracking (press q to quit)", frame)
+                # wait so playback matches the video's real speed (x --speed)
+                target_ms = 1000.0 / (fps_in * max(args.speed, 0.05))
+                wait_ms = max(1, int(target_ms - (time.time() - loop_start) * 1000))
+                if cv2.waitKey(wait_ms) & 0xFF == ord("q"):
+                    break
+    except KeyboardInterrupt:
+        pass
+    finally:
+        cap.release()
+        if writer:
+            writer.release()
+            print("Saved: output/result.mp4")
+        cv2.destroyAllWindows()
+        print(f"Done. Total unique objects tracked: {len(seen_ids)}")
+
+
+if __name__ == "__main__":
+    main()
